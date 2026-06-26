@@ -1,29 +1,29 @@
 /**
- * Living Novel Engine - v1.2.3
- * Streamlined, non-intrusive story coordinator for Perchance Character Chat.
+ * Living Novel Engine - v2.0.0 (Streamlined Two-Button Edition)
+ * Minimalist, event-driven story coordinator for Perchance AI Character Chat.
  * Uses native shortcutButtons and chat-integrated hidden messages to bypass sandbox constraints.
  */
 (function() {
   "use strict";
 
   // --- CONFIGURABLE CONSTANTS ---
-  const AUTO_STEP_DELAY_MS = 2500;     // Delay before triggering the next turn (gives user time to read)
-  const GENERATION_TIMEOUT_MS = 15000;  // 15-second self-healing safety lock timeout
+  const STEP_DELAY_MS = 1500;           // Delay between turns in the Continue x5 loop (gives user time to read)
+  const GENERATION_TIMEOUT_MS = 20000;  // 20-second self-healing safety lock timeout
 
   // --- ENGINE STATE ---
   // Store minimal persistent state directly in oc.thread.customData
   function getEngineState() {
     if (typeof oc !== "undefined" && oc.thread && oc.thread.customData) {
       oc.thread.customData.livingNovelEngine = oc.thread.customData.livingNovelEngine || {
-        isAutoRunning: false,
+        turnsRemaining: 0,
         isDirectorMode: false,
         isProcessing: false,
         timeoutId: null
       };
       return oc.thread.customData.livingNovelEngine;
     }
-    // Headless fallback for testing
-    return { isAutoRunning: false, isDirectorMode: false, isProcessing: false, timeoutId: null };
+    // Fallback for testing
+    return { turnsRemaining: 0, isDirectorMode: false, isProcessing: false, timeoutId: null };
   }
 
   // --- NATIVE BUTTONS CONTROLLER ---
@@ -32,23 +32,21 @@
     if (typeof oc === "undefined" || !oc.thread) return;
 
     const state = getEngineState();
+    
+    // Dynamic labels to reflect active state
+    const continueLabel = state.turnsRemaining > 0 ? `■ Stop (${state.turnsRemaining})` : "Continue x5";
+    const directorLabel = state.isDirectorMode ? "■ Close Dir" : "Request Changes";
+
     oc.thread.shortcutButtons = [
       {
-        name: state.isAutoRunning ? "■ Stop Auto" : "▶ Auto",
-        message: "/auto",
+        name: continueLabel,
+        message: "/continue5",
         autoSend: true,
         insertionType: "replace",
         clearAfterSend: true
       },
       {
-        name: "⏭ Continue",
-        message: "/continue",
-        autoSend: true,
-        insertionType: "replace",
-        clearAfterSend: true
-      },
-      {
-        name: state.isDirectorMode ? "■ Exit Dir" : "💬 Director",
+        name: directorLabel,
         message: "/director",
         autoSend: true,
         insertionType: "replace",
@@ -58,8 +56,7 @@
   }
 
   // --- NATIVE GENERATION TRIGGER ---
-  // Triggers one turn of AI generation by pushing a hidden user message with expectsReply: true
-  // We experimentally verify if this triggers Perchance's native generation pipeline
+  // Triggers one turn of AI generation by pushing a hidden system message with expectsReply: true
   function triggerNextTurn() {
     if (typeof oc === "undefined" || !oc.thread || !oc.thread.messages) return;
 
@@ -77,20 +74,31 @@
     state.timeoutId = setTimeout(function() {
       const freshState = getEngineState();
       if (freshState.isProcessing) {
-        console.warn("[Living Novel Engine] [WARNING] Native generation trigger timed out. The platform may have failed to trigger a response to the hidden message. Disabling Auto/Continue mode to fail safely.");
+        console.warn("[Living Novel Engine] Native generation timed out. Disabling loop to fail safely.");
         freshState.isProcessing = false;
-        freshState.isAutoRunning = false; // Disable Auto
-        updateShortcutButtons();          // Revert button label to "▶ Auto"
+        freshState.turnsRemaining = 0;
+        updateShortcutButtons();
         freshState.timeoutId = null;
       }
     }, GENERATION_TIMEOUT_MS);
 
     try {
-      // Push a hidden user message to trigger the native generator
+      const charName = oc.character.name || "Ike";
+      const userName = oc.userCharacter.name || "Anon";
+
+      // Push a hidden system instruction message to trigger the native generator
       oc.thread.messages.push({
-        author: "user",
+        author: "system",
         hiddenFrom: ["user"],
-        content: "[Director: Continue the story. Generate the next logical message. This can be Ike speaking, or the Narrator describing the scenery and actions. Do NOT write dialogue or actions for Anon.]",
+        content: `[System Instruction: This is an automated story continuation turn.
+Write the next single message in the story.
+You must choose who speaks or acts next: ${charName}, ${userName}, or the Narrator.
+Start your message with the speaker's name in brackets, like:
+[${charName}] "..."
+[${userName}] "..."
+[Narrator] ...
+If the scene has reached a natural pause where you must wait for the player's input, start your message with [Stop] followed by any final words.
+Do NOT write dialogue for multiple characters in one message. Write ONLY the message for the chosen speaker.]`,
         expectsReply: true
       });
     } catch (err) {
@@ -116,6 +124,54 @@
     return String(response);
   }
 
+  // --- PARSE AND FORMAT AI STORY TURNS ---
+  // Parses [Speaker] and [Stop] prefixes from the generated text and updates message metadata accordingly
+  function parseAIResponse(message) {
+    if (!message || typeof message.content !== "string") return;
+
+    let content = message.content.trim();
+    const charName = oc.character.name || "Ike";
+    const userName = oc.userCharacter.name || "Anon";
+
+    // 1. Check for [Stop] prefix (case-insensitive) to halt the loop early
+    const stopMatch = content.match(/^\[stop\]\s*([\s\S]*)$/i);
+    if (stopMatch) {
+      console.log("[Living Novel Engine] [Stop] prefix detected. Halting Continue loop.");
+      const state = getEngineState();
+      state.turnsRemaining = 0;
+      content = stopMatch[1].trim();
+    }
+
+    // 2. Match speaker name in brackets, e.g. [Ike] or [Narrator]
+    const speakerMatch = content.match(/^\[([^\]]+)\]\s*([\s\S]*)$/);
+    if (speakerMatch) {
+      const speaker = speakerMatch[1].trim();
+      const body = speakerMatch[2].trim();
+
+      const lowerSpeaker = speaker.toLowerCase();
+      if (lowerSpeaker === charName.toLowerCase() || lowerSpeaker === "ai" || lowerSpeaker === "ike") {
+        message.name = charName;
+        message.author = "ai";
+      } else if (lowerSpeaker === userName.toLowerCase() || lowerSpeaker === "user" || lowerSpeaker === "anon") {
+        message.name = userName;
+        message.author = "user";
+      } else if (lowerSpeaker === "narrator" || lowerSpeaker === "system" || lowerSpeaker === "nar") {
+        message.name = "Narrator";
+        message.author = "system";
+      } else {
+        // Custom speaker name generated by the AI
+        message.name = speaker;
+        message.author = "ai";
+      }
+      message.content = body;
+    } else {
+      // Fallback to default AI character if no speaker prefix is found
+      message.name = charName;
+      message.author = "ai";
+      message.content = content;
+    }
+  }
+
   // --- PRIVATE DIRECTOR AI CALL ---
   // Calls the Director AI in the background to handle private commands and edits
   async function callDirectorAI(userInstruction) {
@@ -126,31 +182,46 @@
     // Compile recent chat history (excluding private Director messages)
     const mainHistory = oc.thread.messages
       .filter(msg => !(msg.customData && msg.customData.isDirectorPrivate === true))
-      .slice(-12)
+      .slice(-10)
       .map(msg => `${msg.name || msg.author}: ${msg.content}`)
       .join("\n");
 
-    const systemPrompt = `You are the Director AI. You are helping the user manage their roleplay story with the character "Ike". The user's character is "Anon".
+    const charName = oc.character.name || "Ike";
+    const roleInstruction = oc.character.roleInstruction || "";
+    const reminderMessage = oc.character.reminderMessage || "";
+
+    const systemPrompt = `You are the Director AI for a roleplay novel chat between the user (Anon) and the character ${charName}.
+You have direct access to the character's settings (roleplay prompt, lore, memory) and the story history.
+Your job is to help the user edit the story, delete messages, or update character personality, lore, and memory according to their request.
+
 Here is the recent story history:
 ${mainHistory}
 
-The user is speaking to you privately. They want to edit the story, delete messages, change characters, lore, or memories.
-User's instruction: "${userInstruction}"
+Active Character Settings:
+- Name: "${charName}"
+- Role Instruction (Lore & Personality): "${roleInstruction}"
+- Reminder Message (Active Memory): "${reminderMessage}"
 
-You must respond in the following JSON format:
+The user's private instruction to you: "${userInstruction}"
+
+Based on the user's instruction, determine what changes to make. You can modify character settings, delete the last message, or edit the last message.
+Your response MUST be a valid JSON object with the following fields:
 {
-  "reply": "Your conversational response to the user explaining what changes you made.",
+  "reply": "Your conversational reply to the user explaining what you did.",
+  "characterChanges": {
+    "name": "New name (only if requested)",
+    "roleInstruction": "Full updated role instructions incorporating new lore/rules (only if requested)",
+    "reminderMessage": "Full updated reminder message incorporating new memories (only if requested)"
+  },
   "actions": [
     { "type": "delete_last" },
-    { "type": "edit_last", "content": "new text content" },
-    { "type": "update_lore", "content": "new lore details" },
-    { "type": "update_memory", "content": "new memory details" }
+    { "type": "edit_last", "content": "new text content" }
   ]
 }
 Rules:
-- If no action was requested, return an empty actions array.
-- Only perform actions explicitly requested by the user.
-- Respond ONLY with the raw JSON object. Do not add markdown code blocks or explanations outside the JSON.`;
+1. Only return the fields that are being modified. If no character settings change, omit "characterChanges". If no actions are needed, omit "actions" or make it empty.
+2. Maintain the core personality of ${charName} unless explicitly asked to change it.
+3. Respond ONLY with the raw JSON object. Do not wrap it in markdown code blocks or add any other text outside the JSON.`;
 
     try {
       const rawResponse = await oc.generateText({ instruction: systemPrompt });
@@ -177,7 +248,7 @@ Rules:
             break;
           }
         }
-      } else if (action.type === "edit_last" && action.content) {
+      } else if (action.type === "edit_last" && typeof action.content === "string") {
         // Edit the last story message
         for (let i = oc.thread.messages.length - 1; i >= 0; i--) {
           const msg = oc.thread.messages[i];
@@ -187,14 +258,6 @@ Rules:
             break;
           }
         }
-      } else if (action.type === "update_lore" && action.content) {
-        // Save lore to customData
-        oc.thread.customData.lore = action.content;
-        console.log("[Living Novel Engine] Director updated story lore.");
-      } else if (action.type === "update_memory" && action.content) {
-        // Save memory to customData
-        oc.thread.customData.memory = action.content;
-        console.log("[Living Novel Engine] Director updated Ike's memory.");
       }
     });
   }
@@ -221,7 +284,7 @@ Rules:
     
     // Always heal locks and reset loop running state on refresh/load to avoid dangling states
     state.isProcessing = false;
-    state.isAutoRunning = false;
+    state.turnsRemaining = 0;
     state.isDirectorMode = false;
     if (state.timeoutId) {
       clearTimeout(state.timeoutId);
@@ -276,16 +339,23 @@ Rules:
               console.error("[Living Novel Engine] Failed to delete command message:", e);
             }
 
-            if (cmd === "/continue") {
-              console.log("[Living Novel Engine] Intercepted /continue");
-              triggerNextTurn();
-            } 
-            else if (cmd === "/auto") {
-              console.log("[Living Novel Engine] Intercepted /auto");
-              state.isAutoRunning = !state.isAutoRunning;
-              updateShortcutButtons();
+            if (cmd === "/continue5") {
+              console.log("[Living Novel Engine] Intercepted /continue5");
               
-              if (state.isAutoRunning) {
+              if (state.turnsRemaining > 0) {
+                // Clicking the button while the loop is running acts as a Stop toggle
+                console.log("[Living Novel Engine] Stopping active Continue loop.");
+                state.turnsRemaining = 0;
+                state.isProcessing = false;
+                if (state.timeoutId) {
+                  clearTimeout(state.timeoutId);
+                  state.timeoutId = null;
+                }
+                updateShortcutButtons();
+              } else {
+                // Start the Continue x5 loop
+                state.turnsRemaining = 5;
+                updateShortcutButtons();
                 triggerNextTurn();
               }
             } 
@@ -299,7 +369,7 @@ Rules:
                 const welcomeMsg = {
                   author: "system",
                   name: "Director",
-                  content: "*The Director opens a private connection in the chat. Any messages you type here will be private and hidden from Ike. Type instructions to change the story, delete messages, or edit lore. Click '■ Exit Dir' above to close this connection.*",
+                  content: "*The Director opens a private connection. Ask me to edit the story, delete messages, change characters, lore, or memories. Ike cannot see these messages. Click '■ Close Dir' to save and exit.*",
                   hiddenFrom: ["ai"],
                   expectsReply: false,
                   customData: { isDirectorPrivate: true }
@@ -314,7 +384,7 @@ Rules:
 
           // Check if it's a text message in Director mode
           if (state.isDirectorMode) {
-            // A private message to the Director!
+            // Mark the user message as a private request to the Director
             message.hiddenFrom = ["ai"];
             message.expectsReply = false;
             message.customData = message.customData || {};
@@ -325,8 +395,9 @@ Rules:
             
             let replyText = responseText;
             let actions = [];
+            let characterChanges = null;
             try {
-              // Extract JSON block if model wrapped it in markdown
+              // Extract JSON block if model wrapped it in markdown code blocks
               let jsonStr = responseText.trim();
               const jsonMatch = responseText.match(/\{[\s\S]*\}/);
               if (jsonMatch) {
@@ -335,6 +406,7 @@ Rules:
               const parsed = JSON.parse(jsonStr);
               replyText = parsed.reply || "I processed your request.";
               actions = parsed.actions || [];
+              characterChanges = parsed.characterChanges || null;
             } catch (e) {
               console.warn("[Living Novel Engine] Director AI output not in JSON format. Displaying as text.");
             }
@@ -350,20 +422,26 @@ Rules:
             };
             oc.thread.messages.push(directorReply);
 
-            // Execute the actions (mutations)
+            // Execute the actions and character edits
+            if (characterChanges) {
+              if (characterChanges.name) oc.character.name = characterChanges.name;
+              if (characterChanges.roleInstruction) oc.character.roleInstruction = characterChanges.roleInstruction;
+              if (characterChanges.reminderMessage) oc.character.reminderMessage = characterChanges.reminderMessage;
+              console.log("[Living Novel Engine] Applied character settings updates from Director.");
+            }
             executeDirectorActions(actions);
           } else {
             // Standard user message in the story!
-            // If the auto loop was running, automatically pause it so the user can speak
-            if (state.isAutoRunning) {
-              console.log("[Living Novel Engine] User interjected. Pausing Auto loop.");
-              state.isAutoRunning = false;
+            // If the continue loop was running, immediately stop it so the user can speak
+            if (state.turnsRemaining > 0) {
+              console.log("[Living Novel Engine] User interjected. Stopping Continue loop.");
+              state.turnsRemaining = 0;
               updateShortcutButtons();
             }
           }
         }
 
-        // 2. Intercept AI messages (to handle lock release and Auto loop progression)
+        // 2. Intercept AI/System messages (to handle lock release and loop progression)
         else if (message.author === "ai" || message.author === "system") {
           // If it's a private Director message, ignore it
           if (message.customData && message.customData.isDirectorPrivate === true) {
@@ -380,15 +458,30 @@ Rules:
             }
           }
 
-          // If Auto Endless is active, trigger the next turn after the configurable delay
-          if (state.isAutoRunning) {
-            setTimeout(function() {
-              const freshState = getEngineState();
-              if (freshState.isAutoRunning) {
-                console.log("[Living Novel Engine] Event-driven Auto loop: triggering next turn...");
-                triggerNextTurn();
-              }
-            }, AUTO_STEP_DELAY_MS);
+          // If the Continue loop is active, parse and progress
+          if (state.turnsRemaining > 0) {
+            // Parse the speaker prefix and check for Stop commands
+            parseAIResponse(message);
+
+            // Decrement remaining turns and update buttons
+            if (state.turnsRemaining > 0) {
+              state.turnsRemaining--;
+            }
+            updateShortcutButtons();
+
+            // Progress to the next turn if turns are still remaining
+            if (state.turnsRemaining > 0) {
+              setTimeout(function() {
+                const freshState = getEngineState();
+                if (freshState.turnsRemaining > 0) {
+                  console.log(`[Living Novel Engine] Continue loop progression: triggering next turn (${freshState.turnsRemaining} remaining)...`);
+                  triggerNextTurn();
+                }
+              }, STEP_DELAY_MS);
+            } else {
+              console.log("[Living Novel Engine] Continue loop completed.");
+              updateShortcutButtons();
+            }
           }
         }
       });
