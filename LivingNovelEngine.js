@@ -1,10 +1,14 @@
 /**
- * Living Novel Engine - v1.1.0
+ * Living Novel Engine - v1.2.0
  * Streamlined, non-intrusive story coordinator for Perchance Character Chat.
  * Uses native shortcutButtons and chat-integrated hidden messages to bypass sandbox constraints.
  */
 (function() {
   "use strict";
+
+  // --- CONFIGURABLE CONSTANTS ---
+  const AUTO_STEP_DELAY_MS = 2500;     // Delay before triggering the next turn (gives user time to read)
+  const GENERATION_TIMEOUT_MS = 15000;  // 15-second self-healing safety lock timeout
 
   // --- ENGINE STATE ---
   // Store minimal persistent state directly in oc.thread.customData
@@ -13,12 +17,13 @@
       oc.thread.customData.livingNovelEngine = oc.thread.customData.livingNovelEngine || {
         isAutoRunning: false,
         isDirectorMode: false,
-        isProcessing: false
+        isProcessing: false,
+        timeoutId: null
       };
       return oc.thread.customData.livingNovelEngine;
     }
     // Headless fallback for testing
-    return { isAutoRunning: false, isDirectorMode: false, isProcessing: false };
+    return { isAutoRunning: false, isDirectorMode: false, isProcessing: false, timeoutId: null };
   }
 
   // --- NATIVE BUTTONS CONTROLLER ---
@@ -47,34 +52,67 @@
   }
 
   // --- NATIVE GENERATION TRIGGER ---
-  // Triggers one turn of AI generation by pushing a hidden system message with expectsReply: true
+  // Triggers one turn of AI generation by pushing a hidden user message with expectsReply: true
+  // We experimentally verify if this triggers Perchance's native generation pipeline
   function triggerNextTurn() {
     if (typeof oc === "undefined" || !oc.thread || !oc.thread.messages) return;
 
     const state = getEngineState();
-    if (state.isProcessing) return;
+    if (state.isProcessing) {
+      console.log("[Living Novel Engine] Trigger turn ignored: generation is already in progress.");
+      return;
+    }
     state.isProcessing = true;
 
+    // Start a self-healing timeout to release the lock if generation hangs or fails
+    if (state.timeoutId) {
+      clearTimeout(state.timeoutId);
+    }
+    state.timeoutId = setTimeout(function() {
+      const freshState = getEngineState();
+      if (freshState.isProcessing) {
+        console.warn("[Living Novel Engine] Lock timeout reached. Self-healing lock release.");
+        freshState.isProcessing = false;
+        freshState.timeoutId = null;
+      }
+    }, GENERATION_TIMEOUT_MS);
+
     try {
-      // Inject a hidden director instruction that Perchance's native generator reads
+      // Push a hidden user message to trigger the native generator
       oc.thread.messages.push({
-        author: "system",
+        author: "user",
         hiddenFrom: ["user"],
-        content: "[Director Instruction: Continue the story. Generate the next logical message. This can be Ike speaking, or the Narrator describing the scenery and actions. Do NOT write dialogue or actions for Anon.]",
+        content: "[Director: Continue the story. Generate the next logical message. This can be Ike speaking, or the Narrator describing the scenery and actions. Do NOT write dialogue or actions for Anon.]",
         expectsReply: true
       });
     } catch (err) {
       console.error("[Living Novel Engine] Trigger turn failed:", err);
-    } finally {
       state.isProcessing = false;
+      if (state.timeoutId) {
+        clearTimeout(state.timeoutId);
+        state.timeoutId = null;
+      }
     }
+  }
+
+  // --- SAFE API OUTPUT NORMALIZATION ---
+  // Safely extracts string content from oc.generateText() regardless of raw string or object return type
+  function normalizeText(response) {
+    if (!response) return "";
+    if (typeof response === "string") return response;
+    if (response.text && typeof response.text === "string") return response.text;
+    if (typeof response === "object") {
+      if (response.content && typeof response.content === "string") return response.content;
+      return JSON.stringify(response);
+    }
+    return String(response);
   }
 
   // --- PRIVATE DIRECTOR AI CALL ---
   // Calls the Director AI in the background to handle private commands and edits
   async function callDirectorAI(userInstruction) {
     if (typeof oc === "undefined" || typeof oc.generateText !== "function") {
-      return "I am the Director. (Running in offline mode)";
+      return JSON.stringify({ reply: "I am the Director. (Running in offline mode)", actions: [] });
     }
 
     // Compile recent chat history (excluding private Director messages)
@@ -107,8 +145,8 @@ Rules:
 - Respond ONLY with the raw JSON object. Do not add markdown code blocks or explanations outside the JSON.`;
 
     try {
-      const responseText = await oc.generateText({ instruction: systemPrompt });
-      return responseText;
+      const rawResponse = await oc.generateText({ instruction: systemPrompt });
+      return normalizeText(rawResponse);
     } catch (err) {
       console.error("[Living Novel Engine] Director AI generation failed:", err);
       return JSON.stringify({ reply: "I encountered an error trying to process your request.", actions: [] });
@@ -177,6 +215,10 @@ Rules:
     state.isProcessing = false;
     state.isAutoRunning = false;
     state.isDirectorMode = false;
+    if (state.timeoutId) {
+      clearTimeout(state.timeoutId);
+      state.timeoutId = null;
+    }
 
     // Initialize and display native buttons
     updateShortcutButtons();
@@ -244,7 +286,7 @@ Rules:
             message.customData = message.customData || {};
             message.customData.isDirectorPrivate = true;
 
-            // Show a typing indicator or direct processing
+            // Call Director AI and process response
             const responseText = await callDirectorAI(content);
             
             let replyText = responseText;
@@ -287,22 +329,32 @@ Rules:
           }
         }
 
-        // 2. Intercept AI messages (to handle Auto loop progression)
+        // 2. Intercept AI messages (to handle lock release and Auto loop progression)
         else if (message.author === "ai" || message.author === "system") {
           // If it's a private Director message, ignore it
           if (message.customData && message.customData.isDirectorPrivate === true) {
             return;
           }
 
-          // If Auto Endless is active, wait and trigger the next turn
+          // Release the processing lock since an AI/Story reply has arrived
+          if (state.isProcessing) {
+            console.log("[Living Novel Engine] AI reply received. Releasing generation lock.");
+            state.isProcessing = false;
+            if (state.timeoutId) {
+              clearTimeout(state.timeoutId);
+              state.timeoutId = null;
+            }
+          }
+
+          // If Auto Endless is active, trigger the next turn after the configurable delay
           if (state.isAutoRunning) {
             setTimeout(function() {
               const freshState = getEngineState();
               if (freshState.isAutoRunning) {
-                console.log("[Living Novel Engine] Auto loop: triggering next turn...");
+                console.log("[Living Novel Engine] Event-driven Auto loop: triggering next turn...");
                 triggerNextTurn();
               }
-            }, 2500); // 2.5s reading delay
+            }, AUTO_STEP_DELAY_MS);
           }
         }
       });
