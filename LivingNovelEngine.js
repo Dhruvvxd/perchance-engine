@@ -1,5 +1,5 @@
 /**
- * Living Novel Engine - v1.2.2
+ * Living Novel Engine - v1.2.3
  * Streamlined, non-intrusive story coordinator for Perchance Character Chat.
  * Uses native shortcutButtons and chat-integrated hidden messages to bypass sandbox constraints.
  */
@@ -36,17 +36,23 @@
       {
         name: state.isAutoRunning ? "■ Stop Auto" : "▶ Auto",
         message: "/auto",
-        autoSend: true
+        autoSend: true,
+        insertionType: "replace",
+        clearAfterSend: true
       },
       {
         name: "⏭ Continue",
         message: "/continue",
-        autoSend: true
+        autoSend: true,
+        insertionType: "replace",
+        clearAfterSend: true
       },
       {
         name: state.isDirectorMode ? "■ Exit Dir" : "💬 Director",
         message: "/director",
-        autoSend: true
+        autoSend: true,
+        insertionType: "replace",
+        clearAfterSend: true
       }
     ];
   }
@@ -306,7 +312,7 @@ Rules:
             return;
           }
 
-          // Check if it's a standard text message
+          // Check if it's a text message in Director mode
           if (state.isDirectorMode) {
             // A private message to the Director!
             message.hiddenFrom = ["ai"];
