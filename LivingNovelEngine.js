@@ -1,5 +1,5 @@
 /**
- * Living Novel Engine - v1.2.1
+ * Living Novel Engine - v1.2.2
  * Streamlined, non-intrusive story coordinator for Perchance Character Chat.
  * Uses native shortcutButtons and chat-integrated hidden messages to bypass sandbox constraints.
  */
@@ -227,12 +227,25 @@ Rules:
 
     // Hook to Perchance MessageAdded event
     if (typeof oc !== "undefined" && oc.thread && typeof oc.thread.on === "function") {
-      oc.thread.on("MessageAdded", async function({ message }) {
+      oc.thread.on("MessageAdded", async function(event) {
+        // Defensively handle both event shapes: { message } and message directly
+        let message = event;
+        if (event && event.message) {
+          message = event.message;
+        }
+
+        if (!message) {
+          console.warn("[Living Novel Engine] MessageAdded fired but message object is null.");
+          return;
+        }
+
+        console.log(`[Living Novel Engine] MessageAdded fired. Author: ${message.author}, Content: ${message.content ? message.content.slice(0, 30) : ""}`);
+
         const state = getEngineState();
 
         // 1. Intercept USER messages (commands & chat entries)
         if (message.author === "user") {
-          const content = message.content.trim();
+          const content = message.content ? message.content.trim() : "";
           
           // Check if it's a native button slash command
           if (content.startsWith("/")) {
@@ -241,8 +254,21 @@ Rules:
             // Set expectsReply = false and delete the command immediately to clean the feed
             message.expectsReply = false;
             try {
-              oc.thread.messages.splice(oc.thread.messages.indexOf(message), 1);
-            } catch (e) {}
+              const idx = oc.thread.messages.indexOf(message);
+              if (idx >= 0) {
+                oc.thread.messages.splice(idx, 1);
+              } else {
+                // Fallback search by content and author
+                for (let i = oc.thread.messages.length - 1; i >= 0; i--) {
+                  if (oc.thread.messages[i].content === message.content && oc.thread.messages[i].author === message.author) {
+                    oc.thread.messages.splice(i, 1);
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              console.error("[Living Novel Engine] Failed to delete command message:", e);
+            }
 
             if (cmd === "/continue") {
               console.log("[Living Novel Engine] Intercepted /continue");
