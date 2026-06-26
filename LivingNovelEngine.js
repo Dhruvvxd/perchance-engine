@@ -1,5 +1,5 @@
 /**
- * Living Novel Engine - v1.2.0
+ * Living Novel Engine - v1.2.1
  * Streamlined, non-intrusive story coordinator for Perchance Character Chat.
  * Uses native shortcutButtons and chat-integrated hidden messages to bypass sandbox constraints.
  */
@@ -71,8 +71,10 @@
     state.timeoutId = setTimeout(function() {
       const freshState = getEngineState();
       if (freshState.isProcessing) {
-        console.warn("[Living Novel Engine] Lock timeout reached. Self-healing lock release.");
+        console.warn("[Living Novel Engine] [WARNING] Native generation trigger timed out. The platform may have failed to trigger a response to the hidden message. Disabling Auto/Continue mode to fail safely.");
         freshState.isProcessing = false;
+        freshState.isAutoRunning = false; // Disable Auto
+        updateShortcutButtons();          // Revert button label to "▶ Auto"
         freshState.timeoutId = null;
       }
     }, GENERATION_TIMEOUT_MS);
